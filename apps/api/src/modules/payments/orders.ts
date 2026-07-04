@@ -99,7 +99,7 @@ export async function finalizarOrden(paymentIntentId: string): Promise<{ ok: boo
 
   const { data: order } = await supabaseAdmin
     .from("orders")
-    .select("id,status,total_centavos")
+    .select("id,status,total_centavos,direccion_envio")
     .eq("stripe_payment_intent_id", paymentIntentId)
     .maybeSingle();
   if (!order) return { ok: false };
@@ -138,6 +138,22 @@ export async function finalizarOrden(paymentIntentId: string): Promise<{ ok: boo
     if (!l.artesano_id) continue;
     porArtesano.set(l.artesano_id, (porArtesano.get(l.artesano_id) ?? 0) + l.subtotal_centavos);
   }
+
+  // Fulfillment por artesano (estado inicial por_validar) con snapshot de la dirección de ENVÍO
+  // (sin facturación). Idempotente por UNIQUE(order, artesano). Es el tablero de trabajo del taller.
+  const dirEnvio = (order as { direccion_envio?: unknown }).direccion_envio ?? null;
+  const fulfillments = [...porArtesano.keys()].map((artesanoId) => ({
+    order_id: order.id as string,
+    artesano_id: artesanoId,
+    direccion_envio: dirEnvio,
+  }));
+  if (fulfillments.length > 0) {
+    const { error: fErr } = await supabaseAdmin
+      .from("order_fulfillments")
+      .upsert(fulfillments, { onConflict: "order_id,artesano_id", ignoreDuplicates: true });
+    if (fErr) console.error(`[orden ${order.id}] crear fulfillments:`, fErr.message);
+  }
+
   const charge = typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id;
 
   for (const [artesanoId, bruto] of porArtesano) {
