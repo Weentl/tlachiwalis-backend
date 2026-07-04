@@ -6,6 +6,7 @@ import { stripe } from "../../stripe";
 import { supabaseAdmin } from "../../supabase";
 import { requireBuyer, type BuyerReq } from "../buyers/require-buyer";
 import { recalcularItems, finalizarOrden, COMISION_BPS } from "./orders";
+import { cotizarEnvio } from "../shipping/quote";
 
 export const paymentsRouter = Router();
 
@@ -239,13 +240,26 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
         }
       : null;
 
+    // ENVÍO: AUTORIDAD del servidor. Se cotiza desde el CP de la dirección elegida + peso de los
+    // ítems (nunca se confía en un monto del cliente). El envío se queda en la plataforma (no se
+    // dispersa al artesano; los payouts siguen basados en subtotales de ítems).
+    const cpDestino = (direccionSnap?.cp as string | null | undefined) ?? null;
+    const cot = await cotizarEnvio(
+      cpDestino,
+      lineas.map((l) => ({ pesoGramos: l.pesoGramos, cantidad: l.cantidad })),
+      total,
+    );
+    const envioCentavos = cot.costoCentavos;
+    const totalConEnvio = total + envioCentavos;
+
     const { error: oErr } = await supabaseAdmin.from("orders").insert({
       id: orderId,
       comprador_id: req.buyer!.id,
       email: req.buyer!.email,
       subtotal_centavos: total,
       comision_centavos: comisionTotal,
-      total_centavos: total,
+      total_centavos: totalConEnvio,
+      envio_centavos: envioCentavos,
       status: "pendiente",
       client_key: parsed.data.idempotencyKey ?? null,
       direccion_envio: direccionSnap,
@@ -271,7 +285,7 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
 
     const pi = await stripe().paymentIntents.create(
       {
-        amount: total,
+        amount: totalConEnvio,
         currency: "mxn",
         customer,
         payment_method_types: ["card"],
@@ -284,7 +298,7 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
     );
 
     await supabaseAdmin.from("orders").update({ stripe_payment_intent_id: pi.id }).eq("id", orderId);
-    return res.json({ ok: true, orderId, clientSecret: pi.client_secret, total });
+    return res.json({ ok: true, orderId, clientSecret: pi.client_secret, total: totalConEnvio, envio: envioCentavos });
   } catch (e) {
     console.error("[payments/checkout]:", e instanceof Error ? e.message : e);
     return res.status(500).json({ ok: false, error: "No se pudo iniciar el pago." });

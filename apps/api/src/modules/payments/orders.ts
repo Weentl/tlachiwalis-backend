@@ -14,6 +14,7 @@ export type LineaOrden = {
   cantidad: number;
   precioCentavos: number; // unitario
   subtotalCentavos: number;
+  pesoGramos: number | null; // para cotizar el envío
 };
 
 /**
@@ -34,7 +35,7 @@ export async function recalcularItems(
     const { data: v } = await supabaseAdmin
       .from("producto_variantes")
       .select(
-        "id,producto_id,opciones,precio_delta_centavos,activa,productos(precio_centavos,nombre,artesano_id,status,artesanos(stripe_account_id,cobros_habilitados,status)),inventario(disponible)",
+        "id,producto_id,opciones,precio_delta_centavos,activa,productos(precio_centavos,nombre,artesano_id,status,peso_gramos,artesanos(stripe_account_id,cobros_habilitados,status)),inventario(disponible)",
       )
       .eq("id", it.varianteId)
       .maybeSingle();
@@ -45,6 +46,7 @@ export async function recalcularItems(
           nombre?: string;
           artesano_id?: string | null;
           status?: string;
+          peso_gramos?: number | null;
           artesanos?:
             | { stripe_account_id?: string | null; cobros_habilitados?: boolean; status?: string }
             | { stripe_account_id?: string | null; cobros_habilitados?: boolean; status?: string }[]
@@ -77,6 +79,7 @@ export async function recalcularItems(
       cantidad: qty,
       precioCentavos: precio,
       subtotalCentavos: precio * qty,
+      pesoGramos: prod.peso_gramos ?? null,
     });
   }
 

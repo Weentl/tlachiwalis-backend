@@ -6,6 +6,7 @@ import { sellersRouter } from "./modules/sellers/routes";
 import { buyersRouter } from "./modules/buyers/routes";
 import { paymentsRouter } from "./modules/payments/routes";
 import { webhooksRouter } from "./modules/payments/webhook";
+import { shippingRouter } from "./modules/shipping/routes";
 import { stubRouter } from "./modules/_stub";
 
 const app = express();
@@ -41,7 +42,7 @@ app.use("/identity", stubRouter("identity")); // auth/roles — pendiente
 app.use("/orders", stubRouter("orders")); // órdenes (outbox) — pendiente
 app.use("/payments", paymentsRouter); // guardar tarjetas del comprador (SetupIntent + Payment Element)
 app.use("/tax", stubRouter("tax")); // retenciones ISR/IVA + CFDI — pendiente
-app.use("/shipping", stubRouter("shipping")); // envíos — pendiente
+app.use("/shipping", shippingRouter); // cotización de envío por zona (CP) + peso
 
 app.listen(config.port, () => {
   console.log(`Tlachiwalis API → http://localhost:${config.port}  (supabase: ${supabaseConfigured})`);
