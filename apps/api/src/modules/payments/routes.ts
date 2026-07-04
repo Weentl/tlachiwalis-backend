@@ -1,9 +1,11 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import type Stripe from "stripe";
 import { z } from "zod";
 import { stripe } from "../../stripe";
 import { supabaseAdmin } from "../../supabase";
 import { requireBuyer, type BuyerReq } from "../buyers/require-buyer";
+import { recalcularItems, finalizarOrden, COMISION_BPS } from "./orders";
 
 export const paymentsRouter = Router();
 
@@ -118,5 +120,114 @@ paymentsRouter.post("/payment-methods/default", requireBuyer, async (req: BuyerR
   } catch (e) {
     console.error("[payments/default]:", e instanceof Error ? e.message : e);
     return res.status(500).json({ ok: false, error: "No se pudo actualizar." });
+  }
+});
+
+// ── Checkout ──────────────────────────────────────────────────────────────
+const checkoutSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        productoId: z.string().min(1).max(120),
+        varianteId: z.string().min(1).max(120),
+        cantidad: z.number().int().positive().max(99),
+      }),
+    )
+    .min(1)
+    .max(50),
+  idempotencyKey: z.string().min(8).max(120).optional(),
+});
+
+/**
+ * POST /payments/checkout — crea la orden (servidor recalcula precios desde la BD, NUNCA confía en el
+ * cliente) y un PaymentIntent (solo tarjeta, sin Link) por el total. Devuelve client_secret + orderId.
+ */
+paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
+  const parsed = checkoutSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "Datos de checkout inválidos." });
+
+  const calc = await recalcularItems(parsed.data.items);
+  if ("error" in calc) return res.status(400).json({ ok: false, error: calc.error });
+  const { lineas, total } = calc;
+  if (total <= 0) return res.status(400).json({ ok: false, error: "Total inválido." });
+
+  // Comisión total = suma de comisiones por artesano.
+  const brutoPorArtesano = new Map<string, number>();
+  for (const l of lineas)
+    if (l.artesanoId) brutoPorArtesano.set(l.artesanoId, (brutoPorArtesano.get(l.artesanoId) ?? 0) + l.subtotalCentavos);
+  let comisionTotal = 0;
+  for (const bruto of brutoPorArtesano.values()) comisionTotal += Math.round((bruto * COMISION_BPS) / 10000);
+
+  const orderId = `ord_${randomUUID()}`;
+  try {
+    const customer = await getOrCreateCustomer(req.buyer!.id, req.buyer!.email);
+
+    const { error: oErr } = await supabaseAdmin.from("orders").insert({
+      id: orderId,
+      comprador_id: req.buyer!.id,
+      email: req.buyer!.email,
+      subtotal_centavos: total,
+      comision_centavos: comisionTotal,
+      total_centavos: total,
+      status: "pendiente",
+    });
+    if (oErr) throw new Error(oErr.message);
+
+    const { error: iErr } = await supabaseAdmin.from("order_items").insert(
+      lineas.map((l) => ({
+        order_id: orderId,
+        producto_id: l.productoId,
+        variante_id: l.varianteId,
+        artesano_id: l.artesanoId,
+        nombre: l.nombre,
+        opciones: l.opciones,
+        cantidad: l.cantidad,
+        precio_centavos: l.precioCentavos,
+        subtotal_centavos: l.subtotalCentavos,
+      })),
+    );
+    if (iErr) throw new Error(iErr.message);
+
+    const pi = await stripe().paymentIntents.create(
+      {
+        amount: total,
+        currency: "mxn",
+        customer,
+        payment_method_types: ["card"],
+        transfer_group: orderId,
+        metadata: { order_id: orderId, comprador_id: req.buyer!.id },
+      },
+      parsed.data.idempotencyKey ? { idempotencyKey: parsed.data.idempotencyKey } : undefined,
+    );
+
+    await supabaseAdmin.from("orders").update({ stripe_payment_intent_id: pi.id }).eq("id", orderId);
+    return res.json({ ok: true, orderId, clientSecret: pi.client_secret, total });
+  } catch (e) {
+    console.error("[payments/checkout]:", e instanceof Error ? e.message : e);
+    return res.status(500).json({ ok: false, error: "No se pudo iniciar el pago." });
+  }
+});
+
+/**
+ * POST /payments/order/confirm — el cliente lo llama tras confirmar el pago (testeable en local sin
+ * webhook). Verifica que la orden sea del comprador y finaliza (idempotente; el webhook hace lo mismo).
+ */
+paymentsRouter.post("/order/confirm", requireBuyer, async (req: BuyerReq, res) => {
+  const piId = String((req.body as { paymentIntentId?: string })?.paymentIntentId ?? "");
+  if (!piId) return res.status(400).json({ ok: false, error: "Falta paymentIntentId." });
+  const { data: ord } = await supabaseAdmin
+    .from("orders")
+    .select("comprador_id")
+    .eq("stripe_payment_intent_id", piId)
+    .maybeSingle();
+  if (!ord || ord.comprador_id !== req.buyer!.id) {
+    return res.status(403).json({ ok: false, error: "No autorizado." });
+  }
+  try {
+    const r = await finalizarOrden(piId);
+    return res.json({ ok: r.ok, orderId: r.orderId });
+  } catch (e) {
+    console.error("[payments/order/confirm]:", e instanceof Error ? e.message : e);
+    return res.status(500).json({ ok: false, error: "No se pudo confirmar la orden." });
   }
 });

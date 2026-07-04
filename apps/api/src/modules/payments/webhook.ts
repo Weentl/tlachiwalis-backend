@@ -3,6 +3,7 @@ import type Stripe from "stripe";
 import { stripe } from "../../stripe";
 import { config } from "../../config";
 import { supabaseAdmin } from "../../supabase";
+import { finalizarOrden } from "./orders";
 
 export const webhooksRouter = express.Router();
 
@@ -68,6 +69,13 @@ webhooksRouter.post(
             .eq("stripe_account_id", acct.id);
           if (updErr) console.error("[webhook] account.updated update:", updErr.message);
           else console.log(`[webhook] account.updated ${acct.id} cobros=${cobros}`);
+          break;
+        }
+        case "payment_intent.succeeded": {
+          // Pago de checkout confirmado → finalizar la orden (marcar pagada, decrementar inventario,
+          // transferir a cada artesano). Idempotente (el confirm del cliente hace lo mismo).
+          const pi = event.data.object as Stripe.PaymentIntent;
+          if (pi.metadata?.order_id) await finalizarOrden(pi.id);
           break;
         }
         case "setup_intent.succeeded": {
