@@ -1,0 +1,14 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+allowBuilds:
+  esbuild: false
+  sharp: false
+  unrs-resolver: false
+
+# pnpm 10+ blocks dependency build scripts by default (supply-chain hardening).
+# These were flagged by create-next-app; left un-built (sharp ships prebuilt binaries).
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver

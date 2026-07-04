@@ -1,0 +1,27 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# next / build
+.next/
+out/
+build/
+dist/
+.turbo/
+
+# env / secrets (NUNCA commitear)
+.env
+.env.*
+!.env.example
+
+# misc
+.DS_Store
+*.log
+coverage/
+*.tsbuildinfo
+
+# frontend vive en su propio repo (tlachiwalis-frontend)
+apps/web/
+
+# Claude Code (local)
+.claude/
