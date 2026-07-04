@@ -158,6 +158,26 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
   let comisionTotal = 0;
   for (const bruto of brutoPorArtesano.values()) comisionTotal += Math.round((bruto * COMISION_BPS) / 10000);
 
+  // Idempotencia: si ya existe una orden con este client_key (doble submit), devolverla en vez de
+  // crear otra + otro PaymentIntent.
+  if (parsed.data.idempotencyKey) {
+    const { data: existente } = await supabaseAdmin
+      .from("orders")
+      .select("id,stripe_payment_intent_id,total_centavos")
+      .eq("client_key", parsed.data.idempotencyKey)
+      .eq("comprador_id", req.buyer!.id)
+      .maybeSingle();
+    const prev = existente as { id?: string; stripe_payment_intent_id?: string; total_centavos?: number } | null;
+    if (prev?.stripe_payment_intent_id) {
+      try {
+        const pi = await stripe().paymentIntents.retrieve(prev.stripe_payment_intent_id);
+        return res.json({ ok: true, orderId: prev.id, clientSecret: pi.client_secret, total: prev.total_centavos });
+      } catch {
+        /* si el PI ya no existe, cae a crear una nueva orden abajo */
+      }
+    }
+  }
+
   const orderId = `ord_${randomUUID()}`;
   try {
     const customer = await getOrCreateCustomer(req.buyer!.id, req.buyer!.email);
@@ -170,6 +190,7 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
       comision_centavos: comisionTotal,
       total_centavos: total,
       status: "pendiente",
+      client_key: parsed.data.idempotencyKey ?? null,
     });
     if (oErr) throw new Error(oErr.message);
 

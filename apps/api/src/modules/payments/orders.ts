@@ -34,22 +34,38 @@ export async function recalcularItems(
     const { data: v } = await supabaseAdmin
       .from("producto_variantes")
       .select(
-        "id,producto_id,opciones,precio_delta_centavos,activa,productos(precio_centavos,nombre,artesano_id,status),inventario(disponible)",
+        "id,producto_id,opciones,precio_delta_centavos,activa,productos(precio_centavos,nombre,artesano_id,status,artesanos(stripe_account_id,cobros_habilitados,status)),inventario(disponible)",
       )
       .eq("id", it.varianteId)
       .maybeSingle();
 
     const prod = (v as { productos?: unknown } | null)?.productos as
-      | { precio_centavos?: number; nombre?: string; artesano_id?: string | null; status?: string }
+      | {
+          precio_centavos?: number;
+          nombre?: string;
+          artesano_id?: string | null;
+          status?: string;
+          artesanos?:
+            | { stripe_account_id?: string | null; cobros_habilitados?: boolean; status?: string }
+            | { stripe_account_id?: string | null; cobros_habilitados?: boolean; status?: string }[]
+            | null;
+        }
       | undefined;
     const invRaw = (v as { inventario?: unknown } | null)?.inventario;
     const inv = Array.isArray(invRaw) ? invRaw[0] : invRaw;
     const disponible = (inv as { disponible?: number } | null)?.disponible ?? 0;
+    const artRaw = prod?.artesanos;
+    const art = Array.isArray(artRaw) ? artRaw[0] : artRaw;
 
     if (!v || !prod) return { error: "Una pieza ya no está disponible." };
     if (!v.activa || prod.status !== "publicado") return { error: `"${prod.nombre}" ya no está a la venta.` };
     if (v.producto_id !== it.productoId) return { error: "Ítem inconsistente." };
     if (disponible < qty) return { error: `"${prod.nombre}" no tiene suficiente inventario.` };
+    // SEGURIDAD: nunca cobrar una pieza sin ruta de dispersión (artesano sin cuenta Stripe activa,
+    // o taller pausado). Las piezas de exhibición (es_demo) caen aquí: browsables pero NO comprables.
+    if (!art?.stripe_account_id || !art?.cobros_habilitados || art?.status !== "activo") {
+      return { error: `"${prod.nombre}" es una pieza de exhibición y no está disponible para compra.` };
+    }
 
     const precio = (prod.precio_centavos ?? 0) + ((v.precio_delta_centavos as number) ?? 0);
     lineas.push({

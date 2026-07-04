@@ -43,9 +43,10 @@ values
   'Tejemos palma real con patrones geométricos que pasan de madre a hija. Firmes para el uso diario, bonitas para toda la vida.',
   'Coop. Tenango', 12, 6, true, '/images/handicraft-1.jpg', '/images/handicraft-2.jpg', '{}'::jsonb, 'activo', 'taller', true);
 
--- Los talleres demo se marcan con cobros habilitados (no tienen Stripe real, es data de prueba):
--- así el gate exigir_cobros_para_publicar() permite publicar sus piezas.
-update public.artesanos set cobros_habilitados = true, cobros_detalles_enviados = true
+-- Los talleres demo son de EXHIBICIÓN: `es_demo=true` (no cuenta Stripe real). El gate 0033 les
+-- permite PUBLICAR sus piezas (browsables), pero NO se les cobra (recalcularItems rechaza la compra).
+-- NO se finge `cobros_habilitados` (queda honesto: "sin cuenta aún" en el admin).
+update public.artesanos set es_demo = true
   where user_id is null
     and slug in ('talavera-hnos','macrina-pacheco','taller-coyotepec','taller-linares','familia-ortega','rosa-hernandez','coop-vida-nueva','coop-tenango');
 
