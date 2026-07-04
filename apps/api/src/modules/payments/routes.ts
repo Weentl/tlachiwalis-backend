@@ -124,6 +124,19 @@ paymentsRouter.post("/payment-methods/default", requireBuyer, async (req: BuyerR
 });
 
 // ── Checkout ──────────────────────────────────────────────────────────────
+const facturacionSchema = z.object({
+  rfc: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-ZÑ&0-9]{12,13}$/, "RFC inválido"),
+  razonSocial: z.string().trim().max(200).optional(),
+  regimenFiscal: z.string().trim().max(10).optional(),
+  usoCfdi: z.string().trim().max(10).optional(),
+  cpFiscal: z.string().trim().max(10).optional(),
+  email: z.string().trim().email().max(160).optional(),
+});
+
 const checkoutSchema = z.object({
   items: z
     .array(
@@ -136,6 +149,12 @@ const checkoutSchema = z.object({
     .min(1)
     .max(50),
   idempotencyKey: z.string().min(8).max(120).optional(),
+  // Dirección de envío: id de una direccion del comprador (se valida propiedad → snapshot).
+  direccionId: z.string().uuid().optional(),
+  // Solicitud de factura (opcional). Presente ⇒ requiere_factura. CFDI se emite después (módulo tax).
+  facturacion: facturacionSchema.optional(),
+  // Guardar la tarjeta usada para próximas compras (setup_future_usage off_session).
+  guardarTarjeta: z.boolean().optional(),
 });
 
 /**
@@ -182,6 +201,44 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
   try {
     const customer = await getOrCreateCustomer(req.buyer!.id, req.buyer!.email);
 
+    // Snapshot de ENVÍO: valida que la dirección sea del comprador (anti-IDOR) y la congela en la
+    // orden. Si luego edita/borra la dirección, la orden conserva a dónde se envió.
+    let direccionSnap: Record<string, unknown> | null = null;
+    if (parsed.data.direccionId) {
+      const { data: dir } = await supabaseAdmin
+        .from("direcciones")
+        .select("user_id,destinatario,telefono,calle,colonia,ciudad,estado,cp,referencias")
+        .eq("id", parsed.data.direccionId)
+        .maybeSingle();
+      const d = dir as ({ user_id?: string } & Record<string, unknown>) | null;
+      if (!d || d.user_id !== req.buyer!.id) {
+        return res.status(403).json({ ok: false, error: "Dirección no válida." });
+      }
+      direccionSnap = {
+        destinatario: d.destinatario ?? null,
+        telefono: d.telefono ?? null,
+        calle: d.calle ?? null,
+        colonia: d.colonia ?? null,
+        ciudad: d.ciudad ?? null,
+        estado: d.estado ?? null,
+        cp: d.cp ?? null,
+        referencias: d.referencias ?? null,
+      };
+    }
+
+    // Snapshot de FACTURACIÓN (opcional). CFDI se emite después (módulo tax); aquí solo se captura.
+    const fact = parsed.data.facturacion;
+    const facturacionSnap = fact
+      ? {
+          rfc: fact.rfc,
+          razon_social: fact.razonSocial ?? null,
+          regimen_fiscal: fact.regimenFiscal ?? null,
+          uso_cfdi: fact.usoCfdi ?? null,
+          cp_fiscal: fact.cpFiscal ?? null,
+          email: fact.email ?? null,
+        }
+      : null;
+
     const { error: oErr } = await supabaseAdmin.from("orders").insert({
       id: orderId,
       comprador_id: req.buyer!.id,
@@ -191,6 +248,9 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
       total_centavos: total,
       status: "pendiente",
       client_key: parsed.data.idempotencyKey ?? null,
+      direccion_envio: direccionSnap,
+      facturacion: facturacionSnap,
+      requiere_factura: Boolean(facturacionSnap),
     });
     if (oErr) throw new Error(oErr.message);
 
@@ -216,6 +276,8 @@ paymentsRouter.post("/checkout", requireBuyer, async (req: BuyerReq, res) => {
         customer,
         payment_method_types: ["card"],
         transfer_group: orderId,
+        // Si el comprador pidió guardar la tarjeta, Stripe la adjunta al Customer al pagar.
+        ...(parsed.data.guardarTarjeta ? { setup_future_usage: "off_session" as const } : {}),
         metadata: { order_id: orderId, comprador_id: req.buyer!.id },
       },
       parsed.data.idempotencyKey ? { idempotencyKey: parsed.data.idempotencyKey } : undefined,
